@@ -5,12 +5,14 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.util.List;
+import java.util.Map;
 
 import com.softwarearchetypes.quantity.money.Money;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
+import static com.softwarearchetypes.pricing.ApplicabilityConstraint.equalsTo;
 import static com.softwarearchetypes.pricing.ApplicabilityConstraint.greaterThanOrEqualTo;
 import static com.softwarearchetypes.pricing.ComponentBreakdownAssert.assertThat;
 import static java.time.Clock.fixed;
@@ -40,7 +42,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  *   │   └── insurance-component     — 0.15% od insured-value
  *   └── vat-component               — 23% od netto
  */
-@Disabled //TODO enable when finished
 class HomeworkTest {
 
     static final Instant NOW = LocalDateTime.of(2025, 1, 15, 12, 50).atZone(ZoneId.systemDefault()).toInstant();
@@ -50,7 +51,138 @@ class HomeworkTest {
 
     @BeforeEach
     void setUp() {
-       //TODO: do uzupełnienia
+        // ============================================================
+        // 1. CALCULATORS — cenniki (kalkulatory)
+        // ============================================================
+
+        // Unit price calculators for weight ranges (UNIT interpretation)
+        Calculator unitPrice1to5 = facade.addCalculator("unit-price-1-5", CalculatorType.SIMPLE_FIXED,
+                Parameters.of("amount", Money.pln(new BigDecimal("7.90")),
+                        "interpretation", Interpretation.UNIT));
+
+        Calculator unitPrice5to30 = facade.addCalculator("unit-price-5-30", CalculatorType.SIMPLE_FIXED,
+                Parameters.of("amount", Money.pln(new BigDecimal("6.10")),
+                        "interpretation", Interpretation.UNIT));
+
+        Calculator unitPrice30to70 = facade.addCalculator("unit-price-30-70", CalculatorType.SIMPLE_FIXED,
+                Parameters.of("amount", Money.pln(new BigDecimal("5.20")),
+                        "interpretation", Interpretation.UNIT));
+
+        // Composite calculator for weight-based pricing (delegates to UNIT price calculators)
+        facade.addCalculator("base-calc", CalculatorType.COMPOSITE,
+                Parameters.of(
+                        "ranges", List.of(
+                                CalculatorRange.numeric(new BigDecimal("1"), new BigDecimal("5"), unitPrice1to5.getId()),
+                                CalculatorRange.numeric(new BigDecimal("5"), new BigDecimal("30"), unitPrice5to30.getId()),
+                                CalculatorRange.numeric(new BigDecimal("30"), new BigDecimal("70"), unitPrice30to70.getId())
+                        ),
+                        "rangeSelector", "quantity"
+                ));
+
+        // Fuel surcharge calculators (two rates for temporal versioning)
+        facade.addCalculator("fuel-calc-45", CalculatorType.PERCENTAGE,
+                Parameters.of("percentageRate", new BigDecimal("4.5")));
+
+        facade.addCalculator("fuel-calc-50", CalculatorType.PERCENTAGE,
+                Parameters.of("percentageRate", new BigDecimal("5.0")));
+
+        // ADR surcharge calculator — 50%
+        facade.addCalculator("adr-calc", CalculatorType.PERCENTAGE,
+                Parameters.of("percentageRate", new BigDecimal("50")));
+
+        // Oversized surcharge calculator — 35%
+        facade.addCalculator("oversized-calc", CalculatorType.PERCENTAGE,
+                Parameters.of("percentageRate", new BigDecimal("35")));
+
+        // Time-window surcharge calculator — 25%
+        facade.addCalculator("time-window-calc", CalculatorType.PERCENTAGE,
+                Parameters.of("percentageRate", new BigDecimal("25")));
+
+        // COD calculator — 2%
+        facade.addCalculator("cod-calc", CalculatorType.PERCENTAGE,
+                Parameters.of("percentageRate", new BigDecimal("2")));
+
+        // Insurance calculator — 0.15%
+        facade.addCalculator("insurance-calc", CalculatorType.PERCENTAGE,
+                Parameters.of("percentageRate", new BigDecimal("0.15")));
+
+        // VAT calculator — 23%
+        facade.addCalculator("vat-calc", CalculatorType.PERCENTAGE,
+                Parameters.of("percentageRate", new BigDecimal("23")));
+
+        // ============================================================
+        // 2. COMPONENTS — komponenty cenowe
+        // ============================================================
+
+        // base-component: weight-based pricing with parameter mapping weight → quantity
+        facade.createSimpleComponent("base-component", "base-calc",
+                Map.of("weight", "quantity"));
+
+        // fuel-component: version 1 (Jan–Mar 2025) — 4.5%
+        facade.createSimpleComponent("fuel-component", "fuel-calc-45",
+                Map.of(),
+                Validity.between(
+                        LocalDateTime.of(2025, 1, 1, 0, 0),
+                        LocalDateTime.of(2025, 4, 1, 0, 0)));
+
+        // fuel-component: version 2 (from Apr 2025) — 5.0%
+        facade.createSimpleComponent("fuel-component", "fuel-calc-50",
+                Map.of(),
+                Validity.from(LocalDateTime.of(2025, 4, 1, 0, 0)));
+
+        // adr-component: 50% only when cargo-type = "hazmat"
+        facade.createSimpleComponent("adr-component", "adr-calc",
+                Map.of(),
+                equalsTo("cargo-type", "hazmat"));
+
+        // oversized-component: 35% only when weight >= 30
+        facade.createSimpleComponent("oversized-component", "oversized-calc",
+                Map.of(),
+                greaterThanOrEqualTo("weight", 30));
+
+        // time-window-component: 25% only when delivery-type = "time-window"
+        facade.createSimpleComponent("time-window-component", "time-window-calc",
+                Map.of(),
+                equalsTo("delivery-type", "time-window"));
+
+        // cod-component: 2% of cod-value
+        facade.createSimpleComponent("cod-component", "cod-calc",
+                Map.of("cod-value", "baseAmount"));
+
+        // insurance-component: 0.15% of insured-value
+        facade.createSimpleComponent("insurance-component", "insurance-calc",
+                Map.of("insured-value", "baseAmount"));
+
+        // vat-component: 23% (baseAmount injected via dependency)
+        facade.createSimpleComponent("vat-component", "vat-calc");
+
+        // ============================================================
+        // 3. COMPOSITE COMPONENTS — kompozycja cenowa
+        // ============================================================
+
+        // netto: sum of all net components
+        // fuel, adr, oversized, time-window depend on base-component result as their baseAmount
+        facade.createCompositeComponent(
+                "netto",
+                Map.of(
+                        "fuel-component", Map.of("baseAmount", new ValueOf("base-component")),
+                        "adr-component", Map.of("baseAmount", new ValueOf("base-component")),
+                        "oversized-component", Map.of("baseAmount", new ValueOf("base-component")),
+                        "time-window-component", Map.of("baseAmount", new ValueOf("base-component"))
+                ),
+                "base-component", "fuel-component", "adr-component",
+                "oversized-component", "time-window-component",
+                "cod-component", "insurance-component"
+        );
+
+        // total-cost: netto + VAT (VAT depends on netto result)
+        facade.createCompositeComponent(
+                "total-cost",
+                Map.of(
+                        "vat-component", Map.of("baseAmount", new ValueOf("netto"))
+                ),
+                "netto", "vat-component"
+        );
     }
 
     // ============================================================
